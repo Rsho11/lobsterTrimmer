@@ -8,7 +8,9 @@ from pathlib import Path
 from datetime import timedelta
 
 from yt_dlp import YoutubeDL
-from PyQt6.QtCore import QSize, Qt, QUrl, QObject, pyqtSignal, QPropertyAnimation,QEasingCurve, QTimer, pyqtProperty, QAbstractAnimation, QPoint 
+from PyQt6.QtCore import (QSize, Qt, QUrl, QObject, pyqtSignal, QPropertyAnimation,
+                         QEasingCurve, QTimer, pyqtProperty, QAbstractAnimation,
+                         QPoint, QRect)
                         
 from PyQt6.QtGui  import QFontDatabase, QFont, QTransform, QPixmap, QCursor, QPainter,QColor
 from PyQt6.QtWidgets import (
@@ -329,6 +331,107 @@ class FloatyLabel(QLabel):
         p.drawPixmap(0, 0, self.pixmap())
 
 
+# ────────────────────── RangeSlider ──────────────────────────
+class RangeSlider(QWidget):
+    """Simple horizontal slider with two handles for selecting a range."""
+
+    lowerValueChanged = pyqtSignal(int)
+    upperValueChanged = pyqtSignal(int)
+
+    def __init__(self, minimum=0, maximum=99, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(28)
+        self._min = minimum
+        self._max = maximum
+        self._lower = minimum
+        self._upper = maximum
+        self._bar_h = 6
+        self._handle_r = 8
+        self._active = None
+        self.setMouseTracking(True)
+
+    # ----- value helpers -----
+    def lowerValue(self) -> int: return self._lower
+    def upperValue(self) -> int: return self._upper
+    def setRange(self, a: int, b: int):
+        self._min, self._max = a, b
+        self._lower, self._upper = a, b
+        self.update()
+
+    def setLowerValue(self, v: int):
+        v = max(self._min, min(v, self._upper))
+        if v != self._lower:
+            self._lower = v
+            self.lowerValueChanged.emit(v)
+            self.update()
+
+    def setUpperValue(self, v: int):
+        v = min(self._max, max(v, self._lower))
+        if v != self._upper:
+            self._upper = v
+            self.upperValueChanged.emit(v)
+            self.update()
+
+    def _val_to_pos(self, v: int) -> int:
+        span = self._max - self._min or 1
+        w = self.width() - 2 * self._handle_r
+        return int((v - self._min) / span * w) + self._handle_r
+
+    def _pos_to_val(self, x: float) -> int:
+        span = self._max - self._min or 1
+        w = self.width() - 2 * self._handle_r
+        x = max(self._handle_r, min(x, self.width() - self._handle_r)) - self._handle_r
+        return int(round(x / w * span + self._min))
+
+    # ----- painting -----
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cy = self.height() // 2
+        left = self._val_to_pos(self._lower)
+        right = self._val_to_pos(self._upper)
+
+        # groove
+        track = QRect(self._handle_r, cy - self._bar_h // 2,
+                      self.width() - 2 * self._handle_r, self._bar_h)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#324355"))
+        p.drawRoundedRect(track, 3, 3)
+
+        # selection
+        sel = QRect(left, cy - self._bar_h // 2, right - left, self._bar_h)
+        p.setBrush(QColor("#b22222"))
+        p.drawRoundedRect(sel, 3, 3)
+
+        # handles
+        p.setBrush(QColor("#ff6347"))
+        for x in (left, right):
+            p.drawEllipse(QPoint(x, cy), self._handle_r, self._handle_r)
+
+    # ----- mouse -----
+    def mousePressEvent(self, e):
+        lx = self._val_to_pos(self._lower)
+        ux = self._val_to_pos(self._upper)
+        if abs(e.position().x() - lx) < abs(e.position().x() - ux):
+            self._active = 'low'
+        else:
+            self._active = 'high'
+        self._move(e)
+
+    def mouseMoveEvent(self, e):
+        if self._active:
+            self._move(e)
+
+    def mouseReleaseEvent(self, e):
+        self._active = None
+
+    def _move(self, e):
+        v = self._pos_to_val(e.position().x())
+        if self._active == 'low':
+            self.setLowerValue(v)
+        elif self._active == 'high':
+            self.setUpperValue(v)
+
 # ────────────────────── Main GUI class ────────────────────────
 class MainUI(QWidget):
     def __init__(self):
@@ -447,24 +550,27 @@ class MainUI(QWidget):
 
         # ---------- TRIM-STUDIO pane ----------
         self.video_widget = QVideoWidget()
-        self.player = QMediaPlayer(); audio = QAudioOutput()
-        self.player.setVideoOutput(self.video_widget); self.player.setAudioOutput(audio)
+        self.player = QMediaPlayer(); self.audio = QAudioOutput()
+        self.audio.setVolume(1.0)
+        self.player.setVideoOutput(self.video_widget); self.player.setAudioOutput(self.audio)
 
         self.play_btn = QPushButton(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay), "")
         self.time_lbl = QLabel("00:00 / 00:00", objectName="timeLabel")
 
-        self.start_slider, self.end_slider = (QSlider(Qt.Orientation.Horizontal),QSlider(Qt.Orientation.Horizontal))
-        for s in (self.start_slider, self.end_slider): s.setMinimum(0); s.setMaximum(0)
+        self.timeline_slider = QSlider(Qt.Orientation.Horizontal)
+        self.timeline_slider.setMinimum(0); self.timeline_slider.setMaximum(0)
 
+        self.range_slider = RangeSlider()
         self.start_lbl, self.end_lbl = QLabel("00:00:00"), QLabel("00:00:00")
-        self.set_start_btn, self.set_end_btn = QPushButton("⟵ Set Start"), QPushButton("Set End ⟶")
         self.trim_btn = QPushButton("Trim & Save")
 
         studio = QVBoxLayout(); studio.addWidget(self.video_widget, 1)
-        for lab, sl, tim, bt in [("Start", self.start_slider, self.start_lbl, self.set_start_btn),
-                                 ("End",   self.end_slider,   self.end_lbl,   self.set_end_btn)]:
-            row = QHBoxLayout(); row.addWidget(QLabel(lab)); row.addWidget(sl, 1)
-            row.addWidget(tim);  row.addWidget(bt); studio.addLayout(row)
+        studio.addWidget(self.timeline_slider)
+        row = QHBoxLayout();
+        row.addWidget(self.range_slider, 1)
+        row.addWidget(self.start_lbl)
+        row.addWidget(self.end_lbl)
+        studio.addLayout(row)
         ctl = QHBoxLayout(); ctl.addWidget(self.play_btn); ctl.addWidget(self.time_lbl)
         ctl.addStretch();     ctl.addWidget(self.trim_btn); studio.addLayout(ctl)
         edit_screen = QWidget(); edit_screen.setLayout(studio)
@@ -491,12 +597,13 @@ class MainUI(QWidget):
         self.player.positionChanged.connect(self.update_time)
         self.player.durationChanged.connect(self.got_duration)
 
-        self.start_slider.sliderReleased.connect(lambda: self.preview(self.start_slider.value()))
-        self.end_slider.sliderReleased.connect(lambda: self.preview(self.end_slider.value()))
-        self.start_slider.valueChanged.connect(lambda v: self.start_lbl.setText(hhmmss(v)))
-        self.end_slider.valueChanged.connect(lambda v: self.end_lbl.setText(hhmmss(v)))
-        self.set_start_btn.clicked.connect(self.mark_start)
-        self.set_end_btn.clicked.connect(self.mark_end)
+        self.timeline_slider.sliderMoved.connect(lambda v: self.player.setPosition(int(v*1000)))
+
+        self.range_slider.lowerValueChanged.connect(self._start_changed)
+        self.range_slider.upperValueChanged.connect(self._end_changed)
+        self.range_slider.lowerValueChanged.connect(lambda v: self.preview(v))
+        self.range_slider.upperValueChanged.connect(lambda v: self.preview(v))
+
         self.trim_btn.clicked.connect(self.trim_save)
     def bounce_once(self, lbl: FloatyLabel):
         """Play a quick bounce on *lbl* without interrupting its hover."""
@@ -583,7 +690,11 @@ class MainUI(QWidget):
     def dl_done(self, path:Path, dur:int):
         self.video_path, self.duration = path, dur
         self.player.setSource(QUrl.fromLocalFile(str(path)))
-        self.start_slider.setMaximum(dur); self.end_slider.setMaximum(dur); self.end_slider.setValue(dur)
+        self.range_slider.setRange(0, dur)
+        self.range_slider.setLowerValue(0)
+        self.range_slider.setUpperValue(dur)
+        self.timeline_slider.setRange(0, dur)
+        self.timeline_slider.setValue(0)
         self.stack.setCurrentIndex(1); self.bar.setVisible(False); self.dl_btn.setEnabled(True)
         self.stack.setCurrentIndex(1)
         self.bar.setVisible(False)
@@ -619,35 +730,70 @@ class MainUI(QWidget):
         self.play_btn.setIcon(self.style().standardIcon(icon_enum))
 
     def update_time(self, pos_ms):
-        tot = self.duration or self.player.duration()//1000
-        self.time_lbl.setText(f"{hhmmss(pos_ms/1000)} / {hhmmss(tot)}")
+        tot = self.duration or self.player.duration() // 1000
+        sec = pos_ms / 1000
+        self.time_lbl.setText(f"{hhmmss(sec)} / {hhmmss(tot)}")
+
+        low = self.range_slider.lowerValue()
+        high = self.range_slider.upperValue()
+        if sec < low:
+            sec = low
+            self.player.setPosition(int(sec * 1000))
+        elif sec > high:
+            sec = high
+            self.player.setPosition(int(sec * 1000))
+            self.player.pause()
+            self.play_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+
+        self.timeline_slider.blockSignals(True)
+        self.timeline_slider.setValue(int(sec))
+        self.timeline_slider.blockSignals(False)
 
     def got_duration(self, ms):
         if not self.duration:
-            self.duration=ms//1000
-            for s in (self.start_slider,self.end_slider): s.setMaximum(self.duration)
-            self.end_slider.setValue(self.duration)
+            self.duration = ms // 1000
+            self.range_slider.setRange(0, self.duration)
+            self.range_slider.setUpperValue(self.duration)
+        self.timeline_slider.setRange(self.range_slider.lowerValue(), self.range_slider.upperValue())
 
-    def preview(self, s): self.player.pause(); self.player.setPosition(int(s*1000)); self.update_time(s*1000)
-    def mark_start(self):
-        s=self.player.position()//1000; self.start_slider.setValue(s); self.end_slider.setValue(max(s,self.end_slider.value()))
-    def mark_end(self):
-        s=self.player.position()//1000; self.end_slider.setValue(s); self.start_slider.setValue(min(s,self.start_slider.value()))
+    def preview(self, s):
+        self.player.pause(); self.player.setPosition(int(s*1000)); self.update_time(s*1000)
+
+    def _start_changed(self, v: int):
+        self.start_lbl.setText(hhmmss(v))
+        self.timeline_slider.setMinimum(v)
+        if self.timeline_slider.value() < v:
+            self.timeline_slider.setValue(v)
+
+    def _end_changed(self, v: int):
+        self.end_lbl.setText(hhmmss(v))
+        self.timeline_slider.setMaximum(v)
+        if self.timeline_slider.value() > v:
+            self.timeline_slider.setValue(v)
 
     # fine-tune keys
-    def keyPressEvent(self,e):
-        step=0.1 if e.modifiers()&Qt.KeyboardModifier.ShiftModifier else 1
-        if   e.key()==Qt.Key.Key_A: self.nudge(-step)
-        elif e.key()==Qt.Key.Key_D: self.nudge(step)
-        else: super().keyPressEvent(e)
+    def keyPressEvent(self, e):
+        step = 0.1 if e.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1
+        k = e.key()
+        if k in (Qt.Key.Key_A, Qt.Key.Key_Left):
+            self.nudge(-step)
+        elif k in (Qt.Key.Key_D, Qt.Key.Key_Right):
+            self.nudge(step)
+        elif k == Qt.Key.Key_Space:
+            self.toggle_play()
+        else:
+            super().keyPressEvent(e)
     def nudge(self, dt):
-        p=max(0,min(self.duration,self.player.position()/1000+dt))
-        self.player.setPosition(int(p*1000))
+        low = self.range_slider.lowerValue()
+        high = self.range_slider.upperValue()
+        p = max(low, min(high, self.player.position() / 1000 + dt))
+        self.player.setPosition(int(p * 1000))
 
     # ── Trim ──
     def trim_save(self):
         if not self.video_path: return
-        a,b=self.start_slider.value(), self.end_slider.value()
+        a = self.range_slider.lowerValue()
+        b = self.range_slider.upperValue()
         if b<=a: QMessageBox.warning(self,"Bad range","End must be after Start."); return
         dst, _ = QFileDialog.getSaveFileName(self, "Save clip",
         self.video_path.with_suffix(".trim.mp4").name,"MP4 Video (*.mp4)")
