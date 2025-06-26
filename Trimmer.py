@@ -273,7 +273,7 @@ class SplashScreen(QWidget):
 
         self._done_cb = done_cb  # save callback so _finish can use it
     def _start_crossfade(self):
-            self._done_cb()           # show + fade-in main (see next patch)
+            self._done_cb()           # show + fade-in main
             self._fade_out.start()    # now fade *this* splash away
     # synthetic property so QPropertyAnimation can rotate us
     @pyqtProperty(float)
