@@ -333,10 +333,11 @@ class FloatyLabel(QLabel):
 
 # ────────────────────── RangeSlider ──────────────────────────
 class RangeSlider(QWidget):
-    """Simple horizontal slider with two handles for selecting a range."""
+    """Horizontal slider with three handles: start, position and end."""
 
     lowerValueChanged = pyqtSignal(int)
     upperValueChanged = pyqtSignal(int)
+    valueChanged = pyqtSignal(int)
 
     def __init__(self, minimum=0, maximum=99, parent=None):
         super().__init__(parent)
@@ -345,6 +346,7 @@ class RangeSlider(QWidget):
         self._max = maximum
         self._lower = minimum
         self._upper = maximum
+        self._value = minimum
         self._bar_h = 6
         self._handle_r = 8
         self._active = None
@@ -356,12 +358,16 @@ class RangeSlider(QWidget):
     def setRange(self, a: int, b: int):
         self._min, self._max = a, b
         self._lower, self._upper = a, b
+        self._value = max(a, min(self._value, b))
         self.update()
 
     def setLowerValue(self, v: int):
         v = max(self._min, min(v, self._upper))
         if v != self._lower:
             self._lower = v
+            if self._value < v:
+                self._value = v
+                self.valueChanged.emit(v)
             self.lowerValueChanged.emit(v)
             self.update()
 
@@ -369,7 +375,20 @@ class RangeSlider(QWidget):
         v = min(self._max, max(v, self._lower))
         if v != self._upper:
             self._upper = v
+            if self._value > v:
+                self._value = v
+                self.valueChanged.emit(v)
             self.upperValueChanged.emit(v)
+            self.update()
+
+    def value(self) -> int:
+        return self._value
+
+    def setValue(self, v: int):
+        v = max(self._lower, min(v, self._upper))
+        if v != self._value:
+            self._value = v
+            self.valueChanged.emit(v)
             self.update()
 
     def _val_to_pos(self, v: int) -> int:
@@ -390,6 +409,7 @@ class RangeSlider(QWidget):
         cy = self.height() // 2
         left = self._val_to_pos(self._lower)
         right = self._val_to_pos(self._upper)
+        mid = self._val_to_pos(self._value)
 
         # groove
         track = QRect(self._handle_r, cy - self._bar_h // 2,
@@ -407,15 +427,20 @@ class RangeSlider(QWidget):
         p.setBrush(QColor("#ff6347"))
         for x in (left, right):
             p.drawEllipse(QPoint(x, cy), self._handle_r, self._handle_r)
+        p.setBrush(QColor("#ffe070"))
+        p.drawEllipse(QPoint(mid, cy), self._handle_r, self._handle_r)
 
     # ----- mouse -----
     def mousePressEvent(self, e):
         lx = self._val_to_pos(self._lower)
+        mx = self._val_to_pos(self._value)
         ux = self._val_to_pos(self._upper)
-        if abs(e.position().x() - lx) < abs(e.position().x() - ux):
-            self._active = 'low'
-        else:
-            self._active = 'high'
+        distances = {
+            'low': abs(e.position().x() - lx),
+            'mid': abs(e.position().x() - mx),
+            'high': abs(e.position().x() - ux),
+        }
+        self._active = min(distances, key=distances.get)
         self._move(e)
 
     def mouseMoveEvent(self, e):
@@ -429,8 +454,14 @@ class RangeSlider(QWidget):
         v = self._pos_to_val(e.position().x())
         if self._active == 'low':
             self.setLowerValue(v)
+            if self._value < self._lower:
+                self.setValue(self._lower)
         elif self._active == 'high':
             self.setUpperValue(v)
+            if self._value > self._upper:
+                self.setValue(self._upper)
+        elif self._active == 'mid':
+            self.setValue(v)
 
 # ────────────────────── Main GUI class ────────────────────────
 class MainUI(QWidget):
@@ -557,15 +588,12 @@ class MainUI(QWidget):
         self.play_btn = QPushButton(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay), "")
         self.time_lbl = QLabel("00:00 / 00:00", objectName="timeLabel")
 
-        self.timeline_slider = QSlider(Qt.Orientation.Horizontal)
-        self.timeline_slider.setMinimum(0); self.timeline_slider.setMaximum(0)
-
         self.range_slider = RangeSlider()
+        self.range_slider.setValue(0)
         self.start_lbl, self.end_lbl = QLabel("00:00:00"), QLabel("00:00:00")
         self.trim_btn = QPushButton("Trim & Save")
 
         studio = QVBoxLayout(); studio.addWidget(self.video_widget, 1)
-        studio.addWidget(self.timeline_slider)
         row = QHBoxLayout();
         row.addWidget(self.range_slider, 1)
         row.addWidget(self.start_lbl)
@@ -597,8 +625,7 @@ class MainUI(QWidget):
         self.player.positionChanged.connect(self.update_time)
         self.player.durationChanged.connect(self.got_duration)
 
-        self.timeline_slider.sliderMoved.connect(lambda v: self.player.setPosition(int(v*1000)))
-
+        self.range_slider.valueChanged.connect(lambda v: self.player.setPosition(int(v*1000)))
         self.range_slider.lowerValueChanged.connect(self._start_changed)
         self.range_slider.upperValueChanged.connect(self._end_changed)
         self.range_slider.lowerValueChanged.connect(lambda v: self.preview(v))
@@ -693,8 +720,7 @@ class MainUI(QWidget):
         self.range_slider.setRange(0, dur)
         self.range_slider.setLowerValue(0)
         self.range_slider.setUpperValue(dur)
-        self.timeline_slider.setRange(0, dur)
-        self.timeline_slider.setValue(0)
+        self.range_slider.setValue(0)
         self.stack.setCurrentIndex(1); self.bar.setVisible(False); self.dl_btn.setEnabled(True)
         self.stack.setCurrentIndex(1)
         self.bar.setVisible(False)
@@ -745,31 +771,28 @@ class MainUI(QWidget):
             self.player.pause()
             self.play_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
 
-        self.timeline_slider.blockSignals(True)
-        self.timeline_slider.setValue(int(sec))
-        self.timeline_slider.blockSignals(False)
+        self.range_slider.blockSignals(True)
+        self.range_slider.setValue(int(sec))
+        self.range_slider.blockSignals(False)
 
     def got_duration(self, ms):
         if not self.duration:
             self.duration = ms // 1000
             self.range_slider.setRange(0, self.duration)
             self.range_slider.setUpperValue(self.duration)
-        self.timeline_slider.setRange(self.range_slider.lowerValue(), self.range_slider.upperValue())
 
     def preview(self, s):
         self.player.pause(); self.player.setPosition(int(s*1000)); self.update_time(s*1000)
 
     def _start_changed(self, v: int):
         self.start_lbl.setText(hhmmss(v))
-        self.timeline_slider.setMinimum(v)
-        if self.timeline_slider.value() < v:
-            self.timeline_slider.setValue(v)
+        if self.range_slider.value() < v:
+            self.range_slider.setValue(v)
 
     def _end_changed(self, v: int):
         self.end_lbl.setText(hhmmss(v))
-        self.timeline_slider.setMaximum(v)
-        if self.timeline_slider.value() > v:
-            self.timeline_slider.setValue(v)
+        if self.range_slider.value() > v:
+            self.range_slider.setValue(v)
 
     # fine-tune keys
     def keyPressEvent(self, e):
